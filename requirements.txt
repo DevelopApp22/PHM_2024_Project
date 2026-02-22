@@ -1,0 +1,8 @@
+pandas
+seaborn
+matplotlib
+display
+numpy
+sklearn
+xgboost
+lightgbm
