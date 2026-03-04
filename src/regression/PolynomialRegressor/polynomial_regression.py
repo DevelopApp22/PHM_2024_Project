@@ -39,6 +39,91 @@ class PolynomialRegression:
         Z_poly = self.poly.transform(Z)
         return self.model.predict(Z_poly)
 
+    def predictAll(self, X, y_true=None, FEATURES=None, keep_cols=None):
+        """
+        Restituisce un DataFrame con:
+          - id (0..n-1)
+          - trq_target_pred
+          - trq_margin_pred
+          - (opzionale) trq_margin_true
+          - (opzionale) colonne originali keep_cols
+
+        NOTE:
+          - Il modello predice trq_target_pred.
+          - trq_margin_pred = (trq_measured / trq_target_pred - 1) * 100
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Model not fitted. Call fit() first.")
+
+        import pandas as pd
+        import numpy as np
+
+        # --- assicurati DataFrame ---
+        X_df = X.copy() if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+
+        # --- FEATURES obbligatorie ---
+        if FEATURES is None:
+            raise ValueError("FEATURES must be provided (list of feature column names).")
+        FEATURES = list(FEATURES)
+
+        # --- check: NaN dentro FEATURES ---
+        if any(pd.isna(FEATURES)):
+            raise ValueError(f"FEATURES contains NaN: {[f for f in FEATURES if pd.isna(f)]}")
+
+        # --- check: colonne mancanti ---
+        missing = [c for c in FEATURES if c not in X_df.columns]
+        if missing:
+            raise ValueError(f"Missing columns in X: {missing}")
+
+        # --- check: trq_measured serve per il margin ---
+        if "trq_measured" not in X_df.columns:
+            raise ValueError("Column 'trq_measured' is required to compute trq_margin_pred.")
+
+        # --- preprocessing per il modello ---
+        X_num = X_df[FEATURES].to_numpy()
+        X_2d = self._ensure_2d(X_num)
+        Z = self.scaler.transform(X_2d)
+        Z_poly = self.poly.transform(Z)
+
+        # --- predizione (torque target) ---
+        y_pred = self.model.predict(Z_poly)
+
+        if np.ndim(y_pred) == 2 and y_pred.shape[1] >= 1:
+            trq_target_pred = y_pred[:, 0]
+        else:
+            trq_target_pred = np.asarray(y_pred).ravel()
+
+        # --- sicurezza numerica ---
+        trq_target_pred = np.clip(trq_target_pred, 1e-6, None)
+
+        # --- output ---
+        n = len(X_df)
+        out = pd.DataFrame(index=X_df.index)
+
+        out["id"] = np.arange(n)
+        out["trq_target_pred"] = trq_target_pred
+
+        measured = X_df["trq_measured"].to_numpy()
+        out["trq_margin_pred"] = (measured / trq_target_pred - 1) * 100
+
+        # --- true (opzionale) ---
+        if y_true is not None:
+            y_arr = y_true.to_numpy() if hasattr(y_true, "to_numpy") else np.asarray(y_true)
+            if len(y_arr) != n:
+                raise ValueError(f"y_true length ({len(y_arr)}) != X length ({n})")
+            out["trq_margin_true"] = y_arr
+
+        # --- colonne originali extra (opzionale) ---
+        if keep_cols is not None:
+            keep_cols = list(keep_cols)
+            missing_keep = [c for c in keep_cols if c not in X_df.columns]
+            if missing_keep:
+                raise ValueError(f"keep_cols not found in X: {missing_keep}")
+            for c in keep_cols:
+                out[c] = X_df[c].values
+
+        return out
+
     def compute_residuals(self, X_train, y_true, path):
 
         if not self.is_fitted:

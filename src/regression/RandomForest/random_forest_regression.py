@@ -48,6 +48,74 @@ class RandomForestRegressorModel:
         self._check_fitted()
         return self.model.predict(X)
 
+    def predict_mean_all(self, X, y_true=None, FEATURES=None, keep_cols=None):
+        """
+        Random Forest prediction (mean of trees) + conversion to trq_margin.
+
+        Output columns:
+          - id
+          - trq_target_pred
+          - trq_margin_pred
+          - (optional) trq_margin_true
+          - (optional) keep_cols
+        """
+        self._check_fitted()
+
+        import pandas as pd
+        import numpy as np
+
+        # --- assicurati DataFrame ---
+        X_df = X.copy() if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
+        n = len(X_df)
+
+        # --- FEATURES obbligatorie ---
+        if FEATURES is None:
+            raise ValueError("FEATURES must be provided.")
+
+        FEATURES = list(FEATURES)
+
+        # --- controlli ---
+        missing = [c for c in FEATURES if c not in X_df.columns]
+        if missing:
+            raise ValueError(f"Missing columns in X: {missing}")
+
+        if "trq_measured" not in X_df.columns:
+            raise ValueError("Column 'trq_measured' is required.")
+
+        # --- input modello ---
+        X_num = X_df[FEATURES].to_numpy()
+
+        # --- RF prediction (media alberi) ---
+        trq_target_pred = self.model.predict(X_num)
+
+        trq_target_pred = np.clip(trq_target_pred, 1e-6, None)
+
+        # --- output ---
+        out = pd.DataFrame(index=X_df.index)
+        out["id"] = np.arange(n)
+        out["trq_target_pred"] = trq_target_pred
+
+        measured = X_df["trq_measured"].to_numpy()
+        out["trq_margin_pred"] = (measured / trq_target_pred - 1) * 100
+
+        # --- true opzionale ---
+        if y_true is not None:
+            y_arr = y_true.to_numpy() if hasattr(y_true, "to_numpy") else np.asarray(y_true)
+            if len(y_arr) != n:
+                raise ValueError(f"y_true length ({len(y_arr)}) != X length ({n})")
+            out["trq_margin_true"] = y_arr
+
+        # --- colonne extra opzionali ---
+        if keep_cols is not None:
+            keep_cols = list(keep_cols)
+            missing_keep = [c for c in keep_cols if c not in X_df.columns]
+            if missing_keep:
+                raise ValueError(f"keep_cols not found in X: {missing_keep}")
+            for c in keep_cols:
+                out[c] = X_df[c].values
+
+        return out
+
     def predict_trees(self, X):
         """
         Restituisce le predizioni di ogni albero separatamente

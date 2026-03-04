@@ -193,31 +193,121 @@ def fit_rank_pdfs_loglik(
     best = ok[0] if ok else None
     return ranked, best
 
-def fit_best_pdf_for_forest_predictions(
-    tree_preds,
-    pdf_list=None,
-    fit_fn=fit_scipy_distribution,
-    eps=1e-12,
-):
-    """Fitta la miglior PDF per ogni osservazione usando le predizioni dei singoli alberi."""
-    tree_preds = np.asarray(tree_preds, dtype=float)
+def fit_best_pdf(samples, pdf_names=("norm","t","laplace","skewnorm","gamma","lognorm"), eps=1e-12):
+    """
+    Input: samples (500,) -> predizioni dei 500 alberi per UNA riga
+    Output:
+      - best (dict): pdf scelta + pdf_args + loglik + AIC + BIC + k + n
+      - results (list[dict]): tutte le pdf fittate con le stesse info
 
-    N = tree_preds.shape[0]
-    best_list = []
-    ranked_list = []
+    Regola scelta:
+      1) AIC minimo
+      2) se ΔAIC < 2 tra top2 -> scegli il più semplice (k min)
+      3) se un altro ha BIC migliore di >=10 -> scegli quello
+    """
+    s = np.asarray(samples, dtype=float).ravel()
+    s = s[np.isfinite(s)]
+    n = len(s)
 
-    for i in range(N):
-        ranked_i, best_i = fit_rank_pdfs_loglik(
-            samples=tree_preds[i, :],
-            model_pdfs=MODEL_PDFS,
-            pdf_list=pdf_list,
-            fit_fn=lambda dist, s: fit_fn(dist, s),  # compatibilità
-            eps=eps,
-        )
-        ranked_list.append(ranked_i)
-        best_list.append(best_i)
+    results = []
+    if n == 0:
+        return None, []
 
-    return ranked_list, best_list
+    for name in pdf_names:
+        dist = MODEL_PDFS.get(name)
+        if dist is None:
+            continue
+
+        # filtro supporto: gamma/lognorm solo se >=0
+        if name in ("gamma", "lognorm") and np.min(s) < 0:
+            continue
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                params = dist.fit(s)  # SciPy: (*shape, loc, scale)
+
+            shape_args = tuple(float(x) for x in params[:-2])
+            loc = float(params[-2])
+            scale = float(params[-1])
+
+            pdf_args = {"args": shape_args, "loc": loc, "scale": scale}
+
+            logpdf = dist.logpdf(s, *shape_args, loc=loc, scale=scale)
+            logpdf = np.where(np.isfinite(logpdf), logpdf, np.log(eps))
+            loglik = float(np.sum(logpdf))
+
+            k = int(len(shape_args) + 2)   # shape + loc + scale
+            aic = float(2 * k - 2 * loglik)
+            bic = float(k * np.log(n) - 2 * loglik)
+
+            results.append({
+                "pdf_type": name,
+                "fit_ok": True,
+                "pdf_args": pdf_args,   # <-- quello che ti serve
+                "loglik": loglik,
+                "aic": aic,
+                "bic": bic,
+                "k": k,
+                "n": n,
+                "error": "",
+            })
+
+        except Exception as e:
+            results.append({
+                "pdf_type": name,
+                "fit_ok": False,
+                "pdf_args": None,
+                "loglik": -np.inf,
+                "aic": np.inf,
+                "bic": np.inf,
+                "k": None,
+                "n": n,
+                "error": repr(e),
+            })
+
+    ok = [r for r in results if r["fit_ok"]]
+    bad = [r for r in results if not r["fit_ok"]]
+
+    ok_sorted = sorted(ok, key=lambda r: r["aic"])
+    results_sorted = ok_sorted + bad
+    if not ok:
+        # fallback: normal su mean/std
+        mu = float(np.mean(s))
+        sig = float(np.std(s, ddof=1) + 1e-9)
+        best = {
+            "pdf_type": "norm",
+            "fit_ok": True,
+            "pdf_args": {"args": (), "loc": mu, "scale": sig},
+            "loglik": None,
+            "aic": None,
+            "bic": None,
+            "k": 2,
+            "n": n,
+            "error": "",
+            "note": "fallback_no_fit",
+        }
+        return best, results
+
+    # 1) best AIC
+    ok_sorted_aic = sorted(ok, key=lambda r: r["aic"])
+    best = ok_sorted_aic[0]
+
+    # 2) ΔAIC < 2: scegli più semplice tra top2
+    if len(ok_sorted_aic) > 1:
+        second = ok_sorted_aic[1]
+        if (second["aic"] - best["aic"]) < 2.0:
+            if second["k"] is not None and best["k"] is not None and second["k"] < best["k"]:
+                best = second
+
+    # 3) override BIC se molto migliore
+    best_bic = min(ok, key=lambda r: r["bic"])
+    if best_bic["pdf_type"] != best["pdf_type"]:
+        if (best["bic"] - best_bic["bic"]) >= 10.0:
+            best = best_bic
+
+    return best, results_sorted
+
 
 
 def plot_ranked_pdfs(
@@ -226,12 +316,36 @@ def plot_ranked_pdfs(
     n_points=2000,
     pad_std=4.0,
     bins=40,
-    top_k=3,
+    top_k=4,  # default 4 come volevi
 ):
+    """
+    Plot unico con:
+      - istogramma campioni
+      - overlay delle prime top_k PDF (ordinate per AIC)
+      - legenda con AIC
+    """
+
     xmin, xmax = compute_x_range(samples, pad_std=pad_std)
     x_grid = make_x_grid(xmin, xmax, n_points=n_points)
+    COLORS = ["#d62728", "#1f77b4", "#2ca02c", "#9467bd"]
+    # pulizia samples
+    s = np.asarray(samples, dtype=float).ravel()
+    s = s[np.isfinite(s)]
+
+    plt.figure()
+
+    # istogramma
+    plt.hist(
+        s,
+        bins=bins,
+        range=(xmin, xmax),
+        density=True,
+        alpha=0.35,
+        label="samples",
+    )
 
     idx = 0
+
     for r in ranked_results:
 
         if idx >= top_k:
@@ -245,29 +359,33 @@ def plot_ranked_pdfs(
         if dist is None:
             continue
 
+        pdf_args = r["pdf_args"]
+        shape_args = tuple(pdf_args.get("args", ()))
+        loc = float(pdf_args.get("loc", 0.0))
+        scale = float(pdf_args.get("scale", 1.0))
+        aic = r.get("aic", np.nan)
+
+        # calcolo pdf
+        y = dist.pdf(x_grid, *shape_args, loc=loc, scale=scale)
+        y = np.where(np.isfinite(y), y, 0.0)
+
+        color = COLORS[idx % len(COLORS)]
         idx += 1
 
-        pdf_args = r["pdf_args"]
-        shape_args = pdf_args.get("args", ())
-        loc = pdf_args.get("loc", 0.0)
-        scale = pdf_args.get("scale", 1.0)
-        loglik = r.get("loglik", np.nan)
-
-        title = (
-            f"{idx:02d}) {name} | loglik={loglik:.2f}\n"
-            f"args={shape_args}, loc={loc:.4g}, scale={scale:.4g}"
+        plt.plot(
+            x_grid,
+            y,
+            linewidth=2.5,
+            color=color,
+            label=f"{idx:02d}) {name} | AIC={aic:.2f}",
         )
 
-        plot_hist_and_fitted_pdf(
-            dist=dist,
-            samples=samples,
-            x_grid=x_grid,
-            pdf_args=pdf_args,
-            title=title,
-            bins=bins,
-            x_range=(xmin, xmax),
-        )
-
+    plt.title("Top ranked PDFs (AIC)")
+    plt.xlabel("value")
+    plt.ylabel("density")
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.show()
 
 
 def plot_pdf_with_true_target(
@@ -330,7 +448,10 @@ def plot_pdf_with_true_target(
     y_grid = model.pdf(x_grid, *shape_args, **kwargs)
     y_grid = np.where(np.isfinite(y_grid), y_grid, 0.0)
 
-    x_big = np.linspace(-100, 100, 100000)
+    loc = kwargs.get("loc", 0.0)
+    scale = kwargs.get("scale", 1.0)
+    x_big = np.linspace(loc - 10 * scale, loc + 10 * scale, 100000)
+
     y_big = model.pdf(x_big, *shape_args, **kwargs)
     y_big = np.where(np.isfinite(y_big), y_big, 0.0)
 

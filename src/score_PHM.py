@@ -38,7 +38,9 @@ def get_regression_score(pdf_type, pdf_args, true_target):
         kwargs["scale"] = float(max(kwargs["scale"], 1e-6))
 
     score = model.pdf(true_target, *shape_args, **kwargs)
-    x = np.linspace(-100, 100, 100000)
+    loc = kwargs.get("loc", 0.0)
+    scale = kwargs.get("scale", 1.0)
+    x = np.linspace(loc - 10 * scale, loc + 10 * scale, 100000)
     y = model.pdf(x, *shape_args, **kwargs)
     area = simpson(y, x)
 
@@ -46,7 +48,6 @@ def get_regression_score(pdf_type, pdf_args, true_target):
         score /= area
     y_max = float(np.max(y))
     if y_max > 1:
-        print(y_max)
         score /= y_max
 
     return float(score)
