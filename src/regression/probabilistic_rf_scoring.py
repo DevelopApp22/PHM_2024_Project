@@ -6,29 +6,12 @@ from scipy import stats
 from scipy.integrate import simpson
 import matplotlib.colors as mcolors
 
-from score_PHM import get_regression_score
-
 MODEL_PDFS = {
     "norm": stats.norm,
-    "expon": stats.expon,
-    "uniform": stats.uniform,
-    "gamma": stats.gamma,
-    "beta": stats.beta,
-    "lognorm": stats.lognorm,
-    "chi2": stats.chi2,
-    "weibull_min": stats.weibull_min,
     "t": stats.t,
-    "f": stats.f,
-    "cauchy": stats.cauchy,
     "laplace": stats.laplace,
-    "rayleigh": stats.rayleigh,
-    "pareto": stats.pareto,
-    "gumbel_r": stats.gumbel_r,
     "logistic": stats.logistic,
-    "erlang": stats.erlang,
-    "powerlaw": stats.powerlaw,
-    "nakagami": stats.nakagami,
-    "betaprime": stats.betaprime,
+    "cauchy": stats.cauchy,
 }
 
 def compute_x_range(samples, pad_std=4.0):
@@ -193,7 +176,7 @@ def fit_rank_pdfs_loglik(
     best = ok[0] if ok else None
     return ranked, best
 
-def fit_best_pdf(samples, pdf_names=("norm","t","laplace","skewnorm","gamma","lognorm"), eps=1e-12):
+def fit_best_pdf(samples, pdf_names=("norm","t","laplace","logistic","cauchy"), eps=1e-12):
     """
     Input: samples (500,) -> predizioni dei 500 alberi per UNA riga
     Output:
@@ -205,8 +188,7 @@ def fit_best_pdf(samples, pdf_names=("norm","t","laplace","skewnorm","gamma","lo
       2) se ΔAIC < 2 tra top2 -> scegli il più semplice (k min)
       3) se un altro ha BIC migliore di >=10 -> scegli quello
     """
-    s = np.asarray(samples, dtype=float).ravel()
-    s = s[np.isfinite(s)]
+    s = samples
     n = len(s)
 
     results = []
@@ -215,13 +197,6 @@ def fit_best_pdf(samples, pdf_names=("norm","t","laplace","skewnorm","gamma","lo
 
     for name in pdf_names:
         dist = MODEL_PDFS.get(name)
-        if dist is None:
-            continue
-
-        # filtro supporto: gamma/lognorm solo se >=0
-        if name in ("gamma", "lognorm") and np.min(s) < 0:
-            continue
-
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -315,8 +290,8 @@ def plot_ranked_pdfs(
     samples,
     n_points=2000,
     pad_std=4.0,
-    bins=40,
-    top_k=4,  # default 4 come volevi
+    bins=30,
+    top_k=5,  # default 4 come volevi
 ):
     """
     Plot unico con:
@@ -327,16 +302,18 @@ def plot_ranked_pdfs(
 
     xmin, xmax = compute_x_range(samples, pad_std=pad_std)
     x_grid = make_x_grid(xmin, xmax, n_points=n_points)
-    COLORS = ["#d62728", "#1f77b4", "#2ca02c", "#9467bd"]
-    # pulizia samples
-    s = np.asarray(samples, dtype=float).ravel()
-    s = s[np.isfinite(s)]
+    COLORS = [
+        "#d62728",
+        "#1f77b4",
+        "#2ca02c",
+        "#9467bd",
+        "#ff7f0e",
+    ]
 
     plt.figure()
 
-    # istogramma
     plt.hist(
-        s,
+        samples,
         bins=bins,
         range=(xmin, xmax),
         density=True,
@@ -387,7 +364,6 @@ def plot_ranked_pdfs(
     plt.legend()
     plt.show()
 
-
 def plot_pdf_with_true_target(
     pdf_type,
     pdf_args,
@@ -401,27 +377,44 @@ def plot_pdf_with_true_target(
     line_width=2.5,
 ):
     """
-    Plotta la curva score (normalizzata come get_regression_score) e mostra:
+    Plotta la curva "score" normalizzata e mostra:
     - true target (verde) con y = score(true_target)
-    - prediction (rosso) con y = score(y_pred)
+    - prediction (rosso) con y = score(y_pred) SOLO se y_pred non è None
     """
 
     yt = float(true_target)
-    yp = float(y_pred)
+    yp = None if y_pred is None else float(y_pred)
 
-    score_true = float(get_regression_score(pdf_type, pdf_args, yt))
-    print(score_true)
-    score_pred = float(get_regression_score(pdf_type, pdf_args, yp))
-    print(score_pred)
+    # --- modello + params ---
+    model = MODEL_PDFS[pdf_type]
+    shape_args = tuple(pdf_args.get("args", ()))
+    kwargs = {k: v for k, v in pdf_args.items() if k != "args"}
 
+    if not getattr(model, "shapes", None):
+        shape_args = ()
+
+    if "scale" in kwargs:
+        kwargs["scale"] = float(max(float(kwargs["scale"]), min_scale))
+    else:
+        kwargs["scale"] = float(max(float(pdf_args.get("scale", 1.0)), min_scale))
+
+    if "loc" in kwargs:
+        kwargs["loc"] = float(kwargs["loc"])
+    else:
+        kwargs["loc"] = float(pdf_args.get("loc", 0.0))
+
+    loc = float(kwargs.get("loc", 0.0))
+    scale = float(kwargs.get("scale", 1.0))
+
+    # --- definisci x_range (gestendo yp=None) ---
     if x_range is None:
-        model = MODEL_PDFS[pdf_type]
-        scale = float(max(pdf_args.get("scale", 1.0), min_scale))
-
-        center = 0.5 * (yt + yp)
-        dist = abs(yt - yp)
-
-        half = max(0.75 * dist, 1.0 * scale, 0.25) / max(center_tightness, 1e-9)
+        if yp is None:
+            center = yt
+            half = max(2.0 * scale, 0.25) / max(center_tightness, 1e-9)
+        else:
+            center = 0.5 * (yt + yp)
+            dist = abs(yt - yp)
+            half = max(0.75 * dist, 1.0 * scale, 0.25) / max(center_tightness, 1e-9)
 
         xmin, xmax = center - half, center + half
         if xmin == xmax:
@@ -435,37 +428,34 @@ def plot_pdf_with_true_target(
 
     x_grid = np.linspace(xmin, xmax, int(n_points))
 
-    model = MODEL_PDFS[pdf_type]
-    shape_args = tuple(pdf_args.get("args", ()))
-    kwargs = {k: v for k, v in pdf_args.items() if k != "args"}
-
-    if not getattr(model, "shapes", None):
-        shape_args = ()
-
-    if "scale" in kwargs:
-        kwargs["scale"] = float(max(kwargs["scale"], min_scale))
-
-    y_grid = model.pdf(x_grid, *shape_args, **kwargs)
-    y_grid = np.where(np.isfinite(y_grid), y_grid, 0.0)
-
-    loc = kwargs.get("loc", 0.0)
-    scale = kwargs.get("scale", 1.0)
+    # --- normalizzazione "score": pdf / area / max ---
     x_big = np.linspace(loc - 10 * scale, loc + 10 * scale, 100000)
-
     y_big = model.pdf(x_big, *shape_args, **kwargs)
     y_big = np.where(np.isfinite(y_big), y_big, 0.0)
 
-    area = simpson(y_big, x_big)
-    if np.isfinite(area) and area > 1:
-        y_grid = y_grid / area
+    area = float(simpson(y_big, x_big))
+    if (not np.isfinite(area)) or area <= min_scale:
+        area = 1.0
 
-    y_max = float(np.max(y_big)) if y_big.size else 0.0
-    if np.isfinite(y_max) and y_max > 1:
-        y_grid = y_grid / y_max
+    y_big = y_big / area
+    y_max = float(np.max(y_big)) if y_big.size else 1.0
+    if (not np.isfinite(y_max)) or y_max <= min_scale:
+        y_max = 1.0
 
-    y_max_plot = float(np.max(y_grid)) if y_grid.size else 1.0
+    def score_at(x):
+        val = model.pdf(x, *shape_args, **kwargs)
+        if not np.isfinite(val):
+            val = 0.0
+        return float(val / area / y_max)
 
+    y_grid = model.pdf(x_grid, *shape_args, **kwargs)
+    y_grid = np.where(np.isfinite(y_grid), y_grid, 0.0)
+    y_grid = y_grid / area / y_max
 
+    score_true = score_at(yt)
+    score_pred = None if yp is None else score_at(yp)
+
+    # --- plot ---
     plt.figure()
     plt.plot(x_grid, y_grid, linewidth=line_width)
 
@@ -476,19 +466,21 @@ def plot_pdf_with_true_target(
         zorder=6,
         label=f"true (score={score_true:.3g})"
     )
-
-    plt.scatter(
-        [yp], [score_pred],
-        s=marker_size,
-        color="red",
-        zorder=6,
-        label=f"pred (score={score_pred:.3g})"
-    )
-
     plt.axvline(yt, linestyle="--", alpha=0.6, color="green")
-    plt.axvline(yp, linestyle="--", alpha=0.6, color="red")
 
-    plt.ylim(0.0, y_max_plot * 1.15)
+    # ✅ pred SOLO se yp non è None
+    if yp is not None:
+        plt.scatter(
+            [yp], [score_pred],
+            s=marker_size,
+            color="red",
+            zorder=6,
+            label=f"pred (score={score_pred:.3g})"
+        )
+        plt.axvline(yp, linestyle="--", alpha=0.6, color="red")
+
+    y_max_plot = float(np.max(y_grid)) if y_grid.size else 1.0
+    plt.ylim(0.0, max(y_max_plot * 1.15, 1e-9))
     plt.xlabel("value")
     plt.ylabel("score")
     plt.title(f"{pdf_type}")

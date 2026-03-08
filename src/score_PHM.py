@@ -72,3 +72,26 @@ def get_classification_score(true_label, pred_label, confidence):
 
 def get_challange_score(regression_score,classification_score):
     return (regression_score+classification_score)/2
+
+
+def get_regression_score_target(pdf_type, pdf_args, true_target, sample):
+
+    model = MODEL_PDFS[pdf_type]
+
+    shape_args = tuple(pdf_args.get("args", ()))
+    kwargs = {k: v for k, v in pdf_args.items() if k != "args"}
+    if not getattr(model, "shapes", None):
+        shape_args = ()
+
+    if "scale" in kwargs:
+        kwargs["scale"] = float(max(kwargs["scale"], 1e-6))
+
+    score = model.pdf(true_target, *shape_args, **kwargs)
+    loc = kwargs.get("loc", 0.0)
+    scale = kwargs.get("scale", 1.0)
+    x = np.linspace(loc - 10 * scale, loc + 10 * scale, 100000)
+    densities=model.pdf(sample, *shape_args, **kwargs)
+
+    probs = score / densities.sum()
+
+    return float(probs)
