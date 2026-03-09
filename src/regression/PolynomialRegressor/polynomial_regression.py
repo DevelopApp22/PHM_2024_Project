@@ -6,7 +6,6 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler, PolynomialFeatures
 from sklearn.linear_model import LinearRegression
-
 class PolynomialRegression:
 
     def __init__(self,degree=2):
@@ -54,11 +53,6 @@ class PolynomialRegression:
         """
         if not self.is_fitted:
             raise RuntimeError("Model not fitted. Call fit() first.")
-
-        import pandas as pd
-        import numpy as np
-
-        # --- assicurati DataFrame ---
         X_df = X.copy() if isinstance(X, pd.DataFrame) else pd.DataFrame(X)
 
         # --- FEATURES obbligatorie ---
